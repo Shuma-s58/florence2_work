@@ -1,6 +1,6 @@
 # florence2_work
  
-Florence-2 を用いたラベル認識。
+Florence-2 を用いたラベル認識・箱の検出と、ロボット中心線に対する左右判定。
  
 写真に写っている白いラベル(紙)を検出して正面向きに切り出し、1枚のモンタージュ画像にまとめたうえで、Florence-2 の OCR(`<OCR_WITH_REGION>`)で文字と位置を読み取ります。
  
@@ -22,6 +22,8 @@ Florence-2 を用いたラベル認識。
 | numpy | 1.26.4 |
  
 - `florence2_ocr.py`:`torch`、`transformers`、`pillow`
+- `florence2_phrase.py`:`torch`、`transformers`、`pillow`
+- `bbox_direction.py`:`pillow`（クリックで中心線を指定する場合は `tkinter` も必要）
 - `crop_labels_montage.py`:`opencv-python`、`numpy`
 - `--device cuda` で実行するには、NVIDIA GPU と CUDA 対応の PyTorch が必要です。
 ### インストール
@@ -94,7 +96,146 @@ python florence2_ocr.py montage.png --model Florence2-base/ --device cuda -o out
 - 認識した各領域は個別に保持され、近い領域の結合は行いません。
 - 大文字・小文字は認識結果のまま保持し、フィルタや大文字化はしません。
 - 出力が `--max-new-tokens` に達した場合は、途中で切れた可能性があるという警告を出します。その場合は上限を増やすか、入力を小さな画像に分けてください。
+### 3. Florence-2 による箱の検出（florence2_phrase.py）
+
+`<CAPTION_TO_PHRASE_GROUNDING>` を使い、文章で指定した箱の位置を検出します。文字認識は行いません。箱の位置と左右方向を調べる場合は、モンタージュ画像ではなく、カメラで撮影した元画像を入力してください。
+
+```bash
+python florence2_phrase.py ../delivery_box_2026.jpg \
+  -o boxes.png --json boxes.json
+```
+
+既存のローカルモデルを使う場合:
+
+```bash
+python florence2_phrase.py ../delivery_box_2026.jpg \
+  --model Florence2-base/ --device cuda \
+  -o boxes.png --json boxes.json
+```
+
+既定の検出対象は `A blue box.` です。文章は `--text` で変更できます。
+
+```bash
+python florence2_phrase.py ../delivery_box_2026.jpg \
+  --text "A blue plastic storage box." \
+  -o boxes.png --json boxes.json
+```
+
+| 引数 | 説明 |
+|---|---|
+| `image`（位置引数） | カメラで撮影した入力画像 |
+| `-o`, `--output` | 出力 PNG（省略時は `<入力名>_blue_box.png`） |
+| `--text` | 検出する対象の英文（既定 `A blue box.`） |
+| `--model` | Transformers 形式のモデル ID またはローカルディレクトリ（既定 `florence-community/Florence-2-large`） |
+| `--device` | `auto` / `cpu` / `cuda`（既定 `auto`） |
+| `--font`, `--font-size` | 結果表示用のフォントとサイズ（サイズの既定 `20`） |
+| `--max-new-tokens` | 生成トークン数の上限（既定 `2048`） |
+| `--json` | 検出結果の保存先。次の左右判定で使用するため指定する |
+
+#### 出力
+
+- **結果画像（PNG）**:検出した各箱の bbox と番号を元画像に重ね、下部に結果を表示します。元画像部分は拡大・縮小しません。
+- **標準出力**:`detected`、`count`、`regions` を JSON で出力します。
+- **JSON ファイル**:元画像サイズ、使用モデル、検出対象の文章、検出有無、個数、全 bbox を保存します。
+
+各領域は次の形式です。座標は EXIF の向きを補正した元画像のピクセル座標で、原点は左上です。
+
+```json
+{
+  "id": 1,
+  "label": "A blue box",
+  "bbox": [100.0, 120.0, 400.0, 420.0]
+}
+```
+
+`bbox` は `[xmin, ymin, xmax, ymax]`、つまり左上と右下の座標です。複数の候補はすべて保存します。`detected: true` は有効な候補が1件以上返ったことを示します。画素の色を確認する処理は含まれていないため、「青い」と指定しても別の色の箱が候補になる場合があります。
+
+### 4. 最大 bbox とロボット中心線の左右判定（bbox_direction.py）
+
+`florence2_phrase.py` の結果画像と、同じ推論で保存した JSON を読み込みます。Florence-2 の再推論は行いません。描画された枠の画像解析はせず、JSON の bbox 座標を使って判定します。
+
+カメラの取り付け位置に合わせて、ロボット中心を表す縦線を指定してください。画像中央とは別の位置に設定できます。
+
+#### 画像をクリックして中心線を設定する
+
+```bash
+python bbox_direction.py boxes.png --boxes-json boxes.json
+```
+
+画像上でロボット中心の位置をクリックし、Enter キーまたは `Confirm` ボタンで確定します。Esc キーまたはウィンドウを閉じるとキャンセルします。
+
+GUI を使う場合は Ubuntu の Tkinter が必要です。未インストールなら次を実行してください。
+
+```bash
+sudo apt install python3-tk
+```
+
+#### 中心線の位置を数値で固定する
+
+例えば、ロボット中心が元画像の左端から 620 px の位置なら、次のように実行します。
+
+```bash
+python bbox_direction.py boxes.png \
+  --boxes-json boxes.json --line-x 620 \
+  -o direction.png --json direction.json
+```
+
+クリックで選んだ座標は判定結果の `line_x` に保存されます。次回以降はその値を `--line-x` に指定してください。画像の解像度やカメラの取り付け位置を変えた場合は、中心線を再確認してください。
+
+| 引数 | 説明 |
+|---|---|
+| `image`（位置引数） | Florence-2 が出力した bbox 入り画像 |
+| `--boxes-json` | 同じ画像に対応する検出結果 JSON（必須） |
+| `--line-x` | ロボット中心の X 座標。元画像のピクセル単位。省略時は GUI でクリック指定 |
+| `--deadband` | 中心とみなす左右の許容幅（px、既定 `0`） |
+| `--mirrored` | 鏡像画像の場合に、左右判定から求める旋回方向を反転する |
+| `-o`, `--output` | 判定画像 PNG（省略時は `<入力名>_direction.png`） |
+| `--json` | 判定結果 JSON（省略時は出力 PNG の拡張子を `.json` に変更したパス） |
+
+#### 選択・判定の方法
+
+1. 各 bbox の面積を `(xmax - xmin) × (ymax - ymin)` で計算します。
+2. 最大面積の bbox を1つ選択します。同じ面積なら JSON 内で先に現れた候補を選びます。
+3. 選択した bbox の中心 X 座標を `(xmin + xmax) / 2` で計算します。
+4. `offset_x_px = center_x - line_x` により左右を判定します。
+
+| 条件 | `side` | 通常の非鏡像画像での `turn_direction` |
+|---|---|---|
+| `offset_x_px < -deadband` | `left` | `left`（左を向く） |
+| `offset_x_px > deadband` | `right` | `right`（右を向く） |
+| 上記以外 | `center` | `center`（中心に一致、または許容幅内） |
+| bbox が0件 | `not_detected` | `undetermined`（方向未確定） |
+
+bbox が中心線をまたいでいても、左右判定には **bbox の中心**を使います。`crosses_line` には、bbox が中心線をまたぐかどうかを別途保存します。
+
+中心線の左右 10 px を許容範囲にする例:
+
+```bash
+python bbox_direction.py boxes.png \
+  --boxes-json boxes.json --line-x 620 --deadband 10
+```
+
+#### 出力
+
+- **結果画像（PNG）**:ロボット中心線をマゼンタ、選択した最大 bbox と中心点を黄色で描画します。画像下部に判定結果を追加します。
+- **JSON ファイル・標準出力**:`detected`、`candidate_count`、`line_x`、`side`、`turn_direction`、選択した bbox、面積、中心座標、中心線との差を保存・出力します。
+
+`selected` 内の主な値:
+
+| キー | 内容 |
+|---|---|
+| `id`, `label`, `bbox` | 選択した bbox の情報 |
+| `area_px2` | bbox 面積（px²） |
+| `center_x`, `center_y` | bbox の中心座標（px） |
+| `offset_x_px` | 中心線からの横方向の差。負なら左、正なら右 |
+| `crosses_line` | bbox が中心線をまたぐ場合に `true` |
+
+bbox 未検出時は `selected` が `null` になり、旋回方向は決まりません。このスクリプトは左右方向の判定までを行い、ロボットへの回転指令や回転角度の計算は行いません。
+
+入力画像はリサイズや切り抜きをせず、推論時に生成した JSON と組み合わせて使用してください。元スクリプトの画像下部に追加された説明欄は、bbox 座標や中心線の範囲に含めません。`--line-x` 指定時は GUI 不要です。
+
 ## 参考
  
 - [Transformers: Florence-2](https://huggingface.co/docs/transformers/model_doc/florence2)
 - [florence-community/Florence-2-large](https://huggingface.co/florence-community/Florence-2-large)
+
